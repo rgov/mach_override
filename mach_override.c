@@ -119,7 +119,8 @@ eatKnownInstructions(
 
 	static void
 fixupInstructions(
-    uint32_t		offset,
+    void		*originalFunction,
+    void		*escapeIsland,
     void		*instructionsToFix,
 	int			instructionCount,
 	uint8_t		*instructionSizes );
@@ -247,7 +248,7 @@ mach_override_ptr(
 	// Note that on i386, we do not support someone else changing the code under our feet
 	if ( !err ) {
 		uint32_t offset = (uintptr_t)originalFunctionPtr - (uintptr_t)reentryIsland;
-		fixupInstructions(offset, originalInstructions,
+		fixupInstructions(originalFunctionPtr, reentryIsland, originalInstructions,
 					originalInstructionCount, originalInstructionSizes );
 	
 		if( reentryIsland )
@@ -512,51 +513,54 @@ eatKnownInstructions(
 
 	static void
 fixupInstructions(
-	uint32_t	offset,
+    void		*originalFunction,
+    void		*escapeIsland,
     void		*instructionsToFix,
 	int			instructionCount,
 	uint8_t		*instructionSizes )
 {
-	// The start of "leaq offset(%rip),%rax"
-	static const uint8_t LeaqHeader[] = {0x48, 0x8d, 0x05};
+	void *initialOriginalFunction = originalFunction;
+	int	index, fixed_size, code_size = 0;
+	for (index = 0;index < instructionCount;index += 1)
+		code_size += instructionSizes[index];
 
-	int	index;
 	for (index = 0;index < instructionCount;index += 1)
 	{
-		if (*(uint8_t*)instructionsToFix == 0xE9) // 32-bit jump relative
+                fixed_size = instructionSizes[index];
+		if ((*(uint8_t*)instructionsToFix == 0xE9) || // 32-bit jump relative
+		    (*(uint8_t*)instructionsToFix == 0xE8))   // 32-bit call relative
 		{
+			uint32_t offset = (uintptr_t)originalFunction - (uintptr_t)escapeIsland;
 			uint32_t *jumpOffsetPtr = (uint32_t*)((uintptr_t)instructionsToFix + 1);
 			*jumpOffsetPtr += offset;
 		}
-
-		// leaq offset(%rip),%rax
-		if (memcmp(instructionsToFix, LeaqHeader, 3) == 0) {
-			uint32_t *LeaqOffsetPtr = (uint32_t*)((uintptr_t)instructionsToFix + 3);
-			*LeaqOffsetPtr += offset;
-		}
-
-		// 32-bit call relative to the next addr; pop %eax
-		if (*(uint8_t*)instructionsToFix == 0xE8)
+		if ((*(uint8_t*)instructionsToFix == 0x74) ||  // Near jump if equal (je), 2 bytes.
+		    (*(uint8_t*)instructionsToFix == 0x77))    // Near jump if above (ja), 2 bytes.
 		{
-			// Just this call is larger than the jump we use, so we
-			// know this is the last instruction.
-			assert(index == (instructionCount - 1));
-			assert(instructionSizes[index] == 6);
+			// We replace a near je/ja instruction, "7P JJ", with a 32-bit je/ja, "0F 8P WW XX YY ZZ".
+			// This is critical, otherwise a near jump will likely fall outside the original function.
+			uint32_t offset = (uintptr_t)initialOriginalFunction - (uintptr_t)escapeIsland;
+			uint32_t jumpOffset = *(uint8_t*)((uintptr_t)instructionsToFix + 1);
+			*((uint8_t*)instructionsToFix + 1) = *(uint8_t*)instructionsToFix + 0x10;
+			*(uint8_t*)instructionsToFix = 0x0F;
+			uint32_t *jumpOffsetPtr = (uint32_t*)((uintptr_t)instructionsToFix + 2 );
+			*jumpOffsetPtr = offset + jumpOffset;
+			fixed_size = 6;
+                }
+		
+		originalFunction = (void*)((uintptr_t)originalFunction + instructionSizes[index]);
+		escapeIsland = (void*)((uintptr_t)escapeIsland + instructionSizes[index]);
+		instructionsToFix = (void*)((uintptr_t)instructionsToFix + fixed_size);
 
-                        // Insert "addl $offset, %eax" in the end so that when
-                        // we jump to the rest of the function %eax has the
-                        // value it would have if eip had been pushed by the
-                        // call in its original position.
-			uint8_t *op = instructionsToFix;
-			op += 6;
-			*op = 0x05; // addl
-			uint32_t *addImmPtr = (uint32_t*)(op + 1);
-			*addImmPtr = offset;
+		// Expanding short instructions into longer ones may overwrite the next instructions,
+		// so we must restore them.
+		code_size -= fixed_size;
+		if ((code_size > 0) && (fixed_size != instructionSizes[index])) {
+			bcopy(originalFunction, instructionsToFix, code_size);
 		}
-
-		instructionsToFix = (void*)((uintptr_t)instructionsToFix + instructionSizes[index]);
-    }
+	}
 }
+
 
 #if defined(__i386__)
 __asm(
