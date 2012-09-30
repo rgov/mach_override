@@ -21,12 +21,6 @@ Please base your work off the unstable branch. After making your changes please 
 		<th>CC</th> <th>ARCH</th>
 	</tr>
 	<tr>
-		<td>gcc</td> <td>ppc</td>
-	</tr>
-	<tr>
-		<td>clang</td> <td>ppc</td>
-	</tr>
-	<tr>
 		<td>gcc</td> <td>i386</td>
 	</tr>
 	<tr>
@@ -39,8 +33,6 @@ Please base your work off the unstable branch. After making your changes please 
 		<td>clang</td> <td>x86_64</td>
 	</tr>
 </table>
-
-Obviously ppc can only be tested on ppc Macs or on 10.5 and 10.6 (Rosetta-supporting) Intel Macs.
 
 ## Version History
 

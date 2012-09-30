@@ -3,6 +3,10 @@
 //   Some rights reserved: http://opensource.org/licenses/mit
 //   https://github.com/rentzsch/mach_override
 
+#if !defined(__i386__) && !defined(__x86_64__)
+#error The target architecture is not supported.
+#endif
+
 #include "mach_override.h"
 
 #include <mach-o/dyld.h>
@@ -22,24 +26,7 @@
 #pragma mark	(Constants)
 
 #define kPageSize 4096
-#if defined(__ppc__) || defined(__POWERPC__)
-
-long kIslandTemplate[] = {
-	0x9001FFFC,	//	stw		r0,-4(SP)
-	0x3C00DEAD,	//	lis		r0,0xDEAD
-	0x6000BEEF,	//	ori		r0,r0,0xBEEF
-	0x7C0903A6,	//	mtctr	r0
-	0x8001FFFC,	//	lwz		r0,-4(SP)
-	0x60000000,	//	nop		; optionally replaced
-	0x4E800420 	//	bctr
-};
-
-#define kAddressHi			3
-#define kAddressLo			5
-#define kInstructionHi		10
-#define kInstructionLo		11
-
-#elif defined(__i386__) 
+#if defined(__i386__) 
 
 #define kOriginalInstructionsSize 16
 // On X86 we migh need to instert an add with a 32 bit immediate after the
@@ -109,15 +96,6 @@ allocateBranchIsland(
 freeBranchIsland(
 		BranchIsland	*island );
 
-#if defined(__ppc__) || defined(__POWERPC__)
-	mach_error_t
-setBranchIslandTarget(
-		BranchIsland	*island,
-		const void		*branchTo,
-		long			instruction );
-#endif 
-
-#if defined(__i386__) || defined(__x86_64__)
 mach_error_t
 setBranchIslandTarget_i386(
 						   BranchIsland	*island,
@@ -143,7 +121,6 @@ fixupInstructions(
     void		*instructionsToFix,
 	int			instructionCount,
 	uint8_t		*instructionSizes );
-#endif
 
 /*******************************************************************************
 *	
@@ -153,7 +130,6 @@ fixupInstructions(
 #pragma mark	-
 #pragma mark	(Interface)
 
-#if defined(__i386__) || defined(__x86_64__)
 mach_error_t makeIslandExecutable(void *address) {
 	mach_error_t err = err_none;
     uintptr_t page = (uintptr_t)address & ~(uintptr_t)(kPageSize-1);
@@ -165,7 +141,6 @@ mach_error_t makeIslandExecutable(void *address) {
     }
     return err;
 }
-#endif
 
     mach_error_t
 mach_override_ptr(
@@ -195,15 +170,6 @@ mach_override_ptr(
 	long	*originalFunctionPtr = (long*) originalFunctionAddress;
 	mach_error_t	err = err_none;
 	
-#if defined(__ppc__) || defined(__POWERPC__)
-	//	Ensure first instruction isn't 'mfctr'.
-	#define	kMFCTRMask			0xfc1fffff
-	#define	kMFCTRInstruction	0x7c0903a6
-	
-	long	originalInstruction = *originalFunctionPtr;
-	if( !err && ((originalInstruction & kMFCTRMask) == kMFCTRInstruction) )
-		err = err_cannot_override;
-#elif defined(__i386__) || defined(__x86_64__)
 	int eatenCount = 0;
 	int originalInstructionCount = 0;
 	char originalInstructions[kOriginalInstructionsSize];
@@ -220,7 +186,6 @@ mach_override_ptr(
 	}
 	if (!overridePossible) err = err_cannot_override;
 	if (err) fprintf(stderr, "err = %x %s:%d\n", err, __FILE__, __LINE__);
-#endif
 	
 	//	Make the original function implementation writable.
 	if( !err ) {
@@ -241,17 +206,6 @@ mach_override_ptr(
 		if (err) fprintf(stderr, "err = %x %s:%d\n", err, __FILE__, __LINE__);
 
 	
-#if defined(__ppc__) || defined(__POWERPC__)
-	if( !err )
-		err = setBranchIslandTarget( escapeIsland, overrideFunctionAddress, 0 );
-	
-	//	Build the branch absolute instruction to the escape island.
-	long	branchAbsoluteInstruction = 0; // Set to 0 just to silence warning.
-	if( !err ) {
-		long escapeIslandAddress = ((long) escapeIsland) & 0x3FFFFFF;
-		branchAbsoluteInstruction = 0x48000002 | escapeIslandAddress;
-	}
-#elif defined(__i386__) || defined(__x86_64__)
         if (err) fprintf(stderr, "err = %x %s:%d\n", err, __FILE__, __LINE__);
 
 	if( !err )
@@ -259,10 +213,7 @@ mach_override_ptr(
  
 	if (err) fprintf(stderr, "err = %x %s:%d\n", err, __FILE__, __LINE__);
 	// Build the jump relative instruction to the escape island
-#endif
 
-
-#if defined(__i386__) || defined(__x86_64__)
 	if (!err) {
 		uint32_t addressOffset = ((char*)escapeIsland - (char*)originalFunctionPtr - 5);
 		addressOffset = OSSwapInt32(addressOffset);
@@ -271,7 +222,6 @@ mach_override_ptr(
 		jumpRelativeInstruction |= ((uint64_t)addressOffset & 0xffffffff) << 24;
 		jumpRelativeInstruction = OSSwapInt64(jumpRelativeInstruction);		
 	}
-#endif
 	
 	//	Optionally allocate & return the reentry island. This may contain relocated
 	//  jmp instructions and so has all the same addressing reachability requirements
@@ -284,35 +234,7 @@ mach_override_ptr(
 			*originalFunctionReentryIsland = reentryIsland;
 	}
 	
-#if defined(__ppc__) || defined(__POWERPC__)	
-	//	Atomically:
-	//	o If the reentry island was allocated:
-	//		o Insert the original instruction into the reentry island.
-	//		o Target the reentry island at the 2nd instruction of the
-	//		  original function.
-	//	o Replace the original instruction with the branch absolute.
-	if( !err ) {
-		int escapeIslandEngaged = false;
-		do {
-			if( reentryIsland )
-				err = setBranchIslandTarget( reentryIsland,
-						(void*) (originalFunctionPtr+1), originalInstruction );
-			if( !err ) {
-				escapeIslandEngaged = CompareAndSwap( originalInstruction,
-										branchAbsoluteInstruction,
-										(UInt32*)originalFunctionPtr );
-				if( !escapeIslandEngaged ) {
-					//	Someone replaced the instruction out from under us,
-					//	re-read the instruction, make sure it's still not
-					//	'mfctr' and try again.
-					originalInstruction = *originalFunctionPtr;
-					if( (originalInstruction & kMFCTRMask) == kMFCTRInstruction)
-						err = err_cannot_override;
-				}
-			}
-		} while( !err && !escapeIslandEngaged );
-	}
-#elif defined(__i386__) || defined(__x86_64__)
+
 	// Atomically:
 	//	o If the reentry island was allocated:
 	//		o Insert the original instructions into the reentry island.
@@ -330,16 +252,13 @@ mach_override_ptr(
 			err = setBranchIslandTarget_i386( reentryIsland,
 										 (void*) ((char *)originalFunctionPtr+eatenCount), originalInstructions );
 		// try making islands executable before planting the jmp
-#if defined(__x86_64__) || defined(__i386__)
         if( !err )
             err = makeIslandExecutable(escapeIsland);
         if( !err && reentryIsland )
             err = makeIslandExecutable(reentryIsland);
-#endif
 		if ( !err )
 			atomic_mov64((uint64_t *)originalFunctionPtr, jumpRelativeInstruction);
 	}
-#endif
 	
 	//	Clean up on error.
 	if( err ) {
@@ -472,36 +391,6 @@ freeBranchIsland(
 	@result				<-	mach_error_t
 
 	***************************************************************************/
-#if defined(__ppc__) || defined(__POWERPC__)
-	mach_error_t
-setBranchIslandTarget(
-		BranchIsland	*island,
-		const void		*branchTo,
-		long			instruction )
-{
-	//	Copy over the template code.
-    bcopy( kIslandTemplate, island->instructions, sizeof( kIslandTemplate ) );
-    
-    //	Fill in the address.
-    ((short*)island->instructions)[kAddressLo] = ((long) branchTo) & 0x0000FFFF;
-    ((short*)island->instructions)[kAddressHi]
-    	= (((long) branchTo) >> 16) & 0x0000FFFF;
-    
-    //	Fill in the (optional) instuction.
-    if( instruction != 0 ) {
-        ((short*)island->instructions)[kInstructionLo]
-        	= instruction & 0x0000FFFF;
-        ((short*)island->instructions)[kInstructionHi]
-        	= (instruction >> 16) & 0x0000FFFF;
-    }
-    
-    //MakeDataExecutable( island->instructions, sizeof( kIslandTemplate ) );
-	msync( island->instructions, sizeof( kIslandTemplate ), MS_INVALIDATE );
-    
-    return err_none;
-}
-#endif 
-
 #if defined(__i386__)
 	mach_error_t
 setBranchIslandTarget_i386(
@@ -550,7 +439,6 @@ setBranchIslandTarget_i386(
 #endif
 
 
-#if defined(__i386__) || defined(__x86_64__)
 // simplistic instruction matching
 typedef struct {
 	unsigned int length; // max 15
@@ -618,7 +506,6 @@ static Boolean codeMatchesInstruction(unsigned char *code, AsmInstructionMatch* 
 	return match;
 }
 
-#if defined(__i386__) || defined(__x86_64__)
 	static Boolean 
 eatKnownInstructions( 
 	unsigned char	*code, 
@@ -740,7 +627,6 @@ fixupInstructions(
 		instructionsToFix = (void*)((uintptr_t)instructionsToFix + instructionSizes[index]);
     }
 }
-#endif
 
 #if defined(__i386__)
 __asm(
@@ -784,5 +670,4 @@ void atomic_mov64(
 {
     *targetAddress = value;
 }
-#endif
 #endif
